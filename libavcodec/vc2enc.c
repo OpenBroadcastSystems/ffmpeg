@@ -944,6 +944,7 @@ static int encode_frame(VC2EncContext *s, AVPacket *avpkt, const AVFrame *frame,
 {
     int i, ret;
     int64_t max_frame_bytes;
+    int64_t start, end, total;
 
      /* Threaded DWT transform */
     for (i = 0; i < 3; i++) {
@@ -960,15 +961,23 @@ static int encode_frame(VC2EncContext *s, AVPacket *avpkt, const AVFrame *frame,
     max_frame_bytes = header_size + calc_slice_sizes(s);
 
     if (field < 2) {
-        ret = ff_alloc_packet2(s->avctx, avpkt,
-                               max_frame_bytes << s->interlaced,
-                               max_frame_bytes << s->interlaced);
+        int64_t packet_size = max_frame_bytes;
+        if (field > 0) {
+            /* Allocate the maximum possible packet if field coding to avoid storing
+             * an entire field and waiting for a second field to know the exact size of
+             * both fields */
+            packet_size = ((s->avctx->bit_rate*s->avctx->time_base.num)/s->avctx->time_base.den);
+            packet_size >>= 3;
+        }
+        ret = ff_alloc_packet2(s->avctx, avpkt, packet_size, packet_size);
         if (ret) {
             av_log(s->avctx, AV_LOG_ERROR, "Error getting output packet.\n");
             return ret;
         }
         init_put_bits(&s->pb, avpkt->data, avpkt->size);
     }
+
+    start = put_bits_count(&s->pb) >> 3;
 
     /* Sequence header */
     encode_parse_info(s, DIRAC_PCODE_SEQ_HEADER);
@@ -986,6 +995,22 @@ static int encode_frame(VC2EncContext *s, AVPacket *avpkt, const AVFrame *frame,
 
     /* Encode slices */
     encode_slices(s);
+
+    /* Equalize fields */
+    if (field > 0) {
+        total = ((s->avctx->bit_rate*s->avctx->time_base.num)/s->avctx->time_base.den);
+        total >>= 3;
+        total /= 2;
+        total -= 26;
+
+        end = (put_bits_count(&s->pb) >> 3);
+
+        encode_parse_info(s, DIRAC_PCODE_PAD);
+        for (i = 0; i < (total - (end - start)) - 13; i++)
+            put_bits(&s->pb, 8, 0);
+
+        end = put_bits_count(&s->pb) >> 3;
+    }
 
     /* End sequence */
     encode_parse_info(s, DIRAC_PCODE_END_SEQ);
