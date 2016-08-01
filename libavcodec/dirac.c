@@ -324,7 +324,7 @@ int av_dirac_parse_sequence_header(AVDiracSeqHeader **pdsh,
 {
     AVDiracSeqHeader *dsh;
     GetBitContext gb;
-    unsigned video_format, picture_coding_mode;
+    unsigned video_format;
     int ret;
 
     dsh = av_mallocz(sizeof(*dsh));
@@ -375,16 +375,16 @@ int av_dirac_parse_sequence_header(AVDiracSeqHeader **pdsh,
     if (ret < 0)
         goto fail;
 
-    /* [DIRAC_STD] picture_coding_mode shall be 0 for fields and 1 for frames
-     * currently only used to signal field coding */
-    picture_coding_mode = get_interleaved_ue_golomb(&gb);
-    if (picture_coding_mode != 0) {
-        if (log_ctx) {
-            av_log(log_ctx, AV_LOG_ERROR, "Unsupported picture coding mode %d",
-                   picture_coding_mode);
-        }
-        ret = AVERROR_INVALIDDATA;
-        goto fail;
+    /* [DIRAC_STD] picture_coding_mode shall be 1 for fields and 0 for frames */
+    dsh->field_coding = get_interleaved_ue_golomb(&gb);
+    if (dsh->field_coding > 1) {
+        av_log(log_ctx, AV_LOG_ERROR, "Values above 1 for field coding are reserved!\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    if (dsh->field_coding && !dsh->interlaced) {
+        av_log(log_ctx, AV_LOG_ERROR, "Field coding enabled but content is not interlaced!\n");
+        return AVERROR_INVALIDDATA;
     }
 
     *pdsh = dsh;

@@ -85,6 +85,7 @@ typedef struct AVDiracSeqHeader {
 
     uint8_t interlaced;
     uint8_t top_field_first;
+    uint8_t field_coding;
 
     uint8_t frame_rate_index;       ///< index into dirac_frame_rate[]
     uint8_t aspect_ratio_index;     ///< index into dirac_aspect_ratio[]
