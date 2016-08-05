@@ -473,10 +473,13 @@ static int dirac_unpack_idwt_params(DiracContext *s)
 
     CHECKEDREAD(s->wavelet_depth, tmp > MAX_DWT_LEVELS || tmp < 1, "invalid number of DWT decompositions\n")
 
-    s->num_x        = get_interleaved_ue_golomb(gb);
-    s->num_y        = get_interleaved_ue_golomb(gb);
+    CHECKEDREAD(s->num_x, tmp <= 0, "Invalid number of horizontal slices\n");
+    CHECKEDREAD(s->num_y, tmp <= 0, "Invalid number of vertical slices\n");
+
     s->prefix_bytes = get_interleaved_ue_golomb(gb);
-    s->size_scaler  = get_interleaved_ue_golomb(gb);
+
+    CHECKEDREAD(s->num_y, tmp <= 0, "Invalid slice scaler\n");
+
     if (s->prefix_bytes >= INT_MAX / 8) {
         av_log(s->avctx,AV_LOG_ERROR,"too many prefix bytes\n");
         return AVERROR_INVALIDDATA;
