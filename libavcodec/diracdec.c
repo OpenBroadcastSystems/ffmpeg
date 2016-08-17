@@ -346,7 +346,7 @@ static int decode_lowdelay(DiracContext *s)
     int slice_num = 0;
 
     if (s->slice_params_num_buf != (s->num_x * s->num_y)) {
-        s->slice_params_buf = av_realloc_f(s->thread_buf, s->num_x * s->num_y, sizeof(DiracSlice));
+        s->slice_params_buf = av_realloc_f(s->slice_params_buf, s->num_x * s->num_y, sizeof(DiracSlice));
         if (!s->slice_params_buf) {
             av_log(s->avctx, AV_LOG_ERROR, "slice params buffer allocation failure\n");
             return AVERROR(ENOMEM);
@@ -478,7 +478,7 @@ static int dirac_unpack_idwt_params(DiracContext *s)
 
     s->prefix_bytes = get_interleaved_ue_golomb(gb);
 
-    CHECKEDREAD(s->num_y, tmp <= 0, "Invalid slice scaler\n");
+    CHECKEDREAD(s->size_scaler, tmp <= 0, "Invalid slice scaler\n");
 
     if (s->prefix_bytes >= INT_MAX / 8) {
         av_log(s->avctx,AV_LOG_ERROR,"too many prefix bytes\n");
@@ -754,7 +754,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     uint8_t *buf        = pkt->data;
     int buf_size        = pkt->size;
     int buf_idx         = 0;
-    int ret;
+    int ret, picture_element_present = 0;
     unsigned data_unit_size;
 
     *got_frame = 0;
@@ -790,6 +790,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             av_log(s->avctx, AV_LOG_ERROR, "Error in dirac_decode_data_unit\n");
             return ret;
         }
+        picture_element_present |= *(buf + buf_idx + 4) & 0x8;
         buf_idx += data_unit_size;
     }
 
@@ -800,7 +801,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             return ret;
     }
 
-    *got_frame = 1;
+    *got_frame = picture_element_present;
 
     /* No output for the top field, wait for the second */
     if (s->field_coding && !s->cur_field)
