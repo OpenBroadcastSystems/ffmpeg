@@ -473,8 +473,9 @@ static int dirac_unpack_idwt_params(DiracContext *s)
 
     CHECKEDREAD(s->wavelet_depth, tmp > MAX_DWT_LEVELS || tmp < 1, "invalid number of DWT decompositions\n")
 
-    CHECKEDREAD(s->num_x, tmp <= 0, "Invalid number of horizontal slices\n");
-    CHECKEDREAD(s->num_y, tmp <= 0, "Invalid number of vertical slices\n");
+    /* Min slice size is 8 pixels, so it's a sane limit */
+    CHECKEDREAD(s->num_x, (tmp <= 0 || (tmp > (s->plane[0].width /8))), "Invalid number of horizontal slices\n");
+    CHECKEDREAD(s->num_y, (tmp <= 0 || (tmp > (s->plane[0].height/8))), "Invalid number of vertical slices\n");
 
     s->prefix_bytes = get_interleaved_ue_golomb(gb);
 
