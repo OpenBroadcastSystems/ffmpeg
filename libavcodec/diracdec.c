@@ -188,6 +188,7 @@ static av_cold int dirac_decode_init(AVCodecContext *avctx)
 
     ff_diracdsp_init(&s->diracdsp);
 
+    /* Initialize the golomb reader */
     ff_dirac_golomb_reader_init(&s->reader_ctx);
 
     s->thread_buf = NULL;
@@ -224,6 +225,8 @@ static av_cold int dirac_decode_end(AVCodecContext *avctx)
     return 0;
 }
 
+/* Records coordinates - where exactly to put the coefficients from each
+ * slice to the big coefficients buffer, as well as how many coefficients there are */
 typedef struct SliceCoeffs {
     int left;
     int top;
@@ -232,6 +235,7 @@ typedef struct SliceCoeffs {
     int tot;
 } SliceCoeffs;
 
+/* Counts the total amount of coefficients per level per orientation per slice */
 static int subband_coeffs(DiracContext *s, int x, int y, int p,
                           SliceCoeffs c[MAX_DWT_LEVELS])
 {
@@ -260,9 +264,11 @@ static int decode_hq_slice(DiracContext *s, DiracSlice *slice, uint8_t *tmp_buf)
     GetBitContext *gb = &slice->gb;
     SliceCoeffs coeffs_num[MAX_DWT_LEVELS];
 
+    /* Skip the prefix bytes and read the quantization index */
     skip_bits_long(gb, 8*s->prefix_bytes);
     quant_idx = get_bits(gb, 8);
 
+    /* Very likely a corruption */
     if (quant_idx > DIRAC_MAX_QUANT_INDEX) {
         av_log(s->avctx, AV_LOG_ERROR, "Invalid quantization index - %i\n", quant_idx);
         return AVERROR_INVALIDDATA;
@@ -284,13 +290,16 @@ static int decode_hq_slice(DiracContext *s, DiracSlice *slice, uint8_t *tmp_buf)
         int64_t bits_end = get_bits_count(gb) + 8*length;
         const uint8_t *addr = align_get_bits(gb);
 
+        /* Corruption */
         if (length*8 > get_bits_left(gb)) {
             av_log(s->avctx, AV_LOG_ERROR, "end too far away\n");
             return AVERROR_INVALIDDATA;
         }
 
+        /* Total coefficients in this plane + fill in coeffs_num structure */
         coef_num = subband_coeffs(s, slice->slice_x, slice->slice_y, i, coeffs_num);
 
+        /* Runs the golomb decoder to decode the coefficients into the buffer */
         if (s->pshift)
             coef_par = ff_dirac_golomb_read_32bit(s->reader_ctx, addr,
                                                   length, tmp_buf, coef_num);
@@ -298,6 +307,8 @@ static int decode_hq_slice(DiracContext *s, DiracSlice *slice, uint8_t *tmp_buf)
             coef_par = ff_dirac_golomb_read_16bit(s->reader_ctx, addr,
                                                   length, tmp_buf, coef_num);
 
+        /* Will memset to 0, as per the spec, any remaining coefficients if the
+         * slice ends early to save bits on 0s */
         if (coef_num > coef_par) {
             const int start_b = coef_par * (1 << (s->pshift + 1));
             const int end_b   = coef_num * (1 << (s->pshift + 1));
@@ -310,8 +321,16 @@ static int decode_hq_slice(DiracContext *s, DiracSlice *slice, uint8_t *tmp_buf)
                 const SubBand *b1 = &s->plane[i].band[level][orientation];
                 uint8_t *buf = b1->ibuf + c->top * b1->stride + (c->left << (s->pshift + 1));
 
-                /* Change to c->tot_h <= 4 for AVX2 dequantization */
+                /* Determines whether to use the C or the SIMD version of the
+                 * dequant function, needs to do so because with small slice
+                 * sizes you won't have enough coefficients in the buffer for SIMD.
+                 * The C version is ran once a slice for a coeff or two at most,
+                 * so no performance issues. Change to c->tot_h <= 4 for AVX2
+                 * dequantization */
                 const int qfunc = s->pshift + 2*(c->tot_h <= 2);
+
+                /* Runs the dequant SIMD which puts the serial coefficients into
+                 * the proper image coefficient buffer places */
                 s->diracdsp.dequant_subband[qfunc](&tmp_buf[off], buf, b1->stride,
                                                    qfactor[level][orientation],
                                                    qoffset[level][orientation],
@@ -321,6 +340,7 @@ static int decode_hq_slice(DiracContext *s, DiracSlice *slice, uint8_t *tmp_buf)
             }
         }
 
+        /* Skip to the next plane */
         skip_bits_long(gb, bits_end - get_bits_count(gb));
     }
 
@@ -331,8 +351,11 @@ static int decode_hq_slice_row(AVCodecContext *avctx, void *arg, int jobnr, int 
 {
     int i;
     DiracContext *s = avctx->priv_data;
+    /* Starting slice */
     DiracSlice *slices = ((DiracSlice *)arg) + s->num_x*jobnr;
+    /* Reason to use execute2 - the function knows which thread number it has */
     uint8_t *thread_buf = &s->thread_buf[s->thread_buf_size*threadnr];
+    /* Loop over all horizontal slices in the row */
     for (i = 0; i < s->num_x; i++)
         decode_hq_slice(s, &slices[i], thread_buf);
     return 0;
@@ -352,6 +375,7 @@ static int decode_lowdelay(DiracContext *s)
     SliceCoeffs tmp[MAX_DWT_LEVELS];
     int slice_num = 0;
 
+    /* Reallocs the slices arguments buffer in case the number of slices change */
     if (s->slice_params_num_buf != (s->num_x * s->num_y)) {
         s->slice_params_buf = av_realloc_f(s->slice_params_buf, s->num_x * s->num_y, sizeof(DiracSlice));
         if (!s->slice_params_buf) {
@@ -362,7 +386,13 @@ static int decode_lowdelay(DiracContext *s)
     }
     slices = s->slice_params_buf;
 
-    /* 8 becacuse that's how much the golomb reader could overread junk data
+    /* Reallocs the thread buffer - the temporary storage for slice coefficients
+     * for a single thread if the number of threads changes during runtime
+     * which can definitely happen.
+     * This is the maximum amount of coefficients in a slice in an entire frame
+     * NB: number of coefficients in a slice in a frame is NOT constant and will
+     * change depending on where the slice is, hence this is the maximum.
+     * 8 becacuse that's how much the golomb reader could overread junk data
      * from another plane/slice at most, and 512 because SIMD */
     coef_buf_size = subband_coeffs(s, s->num_x - 1, s->num_y - 1, 0, tmp) + 8;
     coef_buf_size = (coef_buf_size << (1 + s->pshift)) + 512;
@@ -398,6 +428,7 @@ static int decode_lowdelay(DiracContext *s)
             slices[slice_num].bytes   = bytes;
             slices[slice_num].slice_x = slice_x;
             slices[slice_num].slice_y = slice_y;
+            /* Sets all the arguments and get bit contexts to the right addresses */
             init_get_bits(&slices[slice_num].gb, buf, bufsize);
             slice_num++;
 
@@ -409,11 +440,13 @@ static int decode_lowdelay(DiracContext *s)
         }
     }
 
+    /* Very likely to detect overflows */
     if (s->num_x*s->num_y != slice_num) {
         av_log(s->avctx, AV_LOG_ERROR, "too few slices\n");
         return AVERROR_INVALIDDATA;
     }
 
+    /* Runs decode_hq_slice_row to decode the slices in a row per thread */
     avctx->execute2(avctx, decode_hq_slice_row, slices, NULL, s->num_y);
 
     return 0;
@@ -423,6 +456,8 @@ static void init_planes(DiracContext *s)
 {
     int i, w, h, level, orientation;
 
+    /* Does the major per plane buffer allocation and sets up the coefficient
+     * strides and orientations */
     for (i = 0; i < 3; i++) {
         Plane *p = &s->plane[i];
 
@@ -531,12 +566,18 @@ static int idwt_plane(AVCodecContext *avctx, void *arg, int jobnr, int threadnr)
     const int idx     = (s->bit_depth - 8) >> 1;
     const int ostride = p->stride << s->field_coding;
 
+    /* Interleaves the fields */
     frame += s->cur_field * p->stride;
 
+    /* Sets up the DWT context pointers */
     ff_spatial_idwt_init(&d, &p->idwt, s->wavelet_idx + 2, s->wavelet_depth, s->bit_depth);
 
+    /* Does 16 lines at a time -
+     * Could reduce the latency by returning 16 lines instead of an entire frame
+     * and even further if you decode and idwt a row of slices at once */
     for (y = 0; y < p->height; y += 16) {
         ff_spatial_idwt_slice2(&d, y+16); /* decode */
+        /* After doing the 16-line iDWT run the signed->unsigned SIMD */
         s->diracdsp.put_signed_rect_clamped[idx](frame + y*ostride,
                                                  ostride,
                                                  p->idwt.buf + y*p->idwt.stride,
@@ -554,9 +595,12 @@ static int dirac_decode_frame_internal(DiracContext *s)
 {
     int ret;
 
+    /* Does the actual coefficient decoding */
     if ((ret = decode_lowdelay(s)) < 0)
         return ret;
 
+    /* Does the iDWT on the 3 planes in parallel, not in git master since
+     * the MC depends on doing it serially */
     s->avctx->execute2(s->avctx, idwt_plane, NULL, NULL, 3);
 
     return 0;
@@ -566,6 +610,8 @@ static int get_buffer_with_edge(AVCodecContext *avctx, AVFrame *f, int flags)
 {
     int ret;
 
+    /* Pads the allocated height to + 2 * EDGE_WIDTH (+ 2)
+     * Not only needed by the (removed) MC code but for the iDWT too */
     f->width  = avctx->width  + 2 * EDGE_WIDTH;
     f->height = avctx->height + 2 * EDGE_WIDTH + 2;
     ret = ff_get_buffer(avctx, f, flags);
@@ -590,6 +636,7 @@ static int dirac_decode_picture_header(DiracContext *s)
     if ((ret = dirac_unpack_idwt_params(s)) < 0)
         return ret;
 
+    /* Allocates the idwt coefficient buffers */
     init_planes(s);
     return 0;
 }
@@ -613,13 +660,18 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
     AVDiracSeqHeader *dsh;
     DiracContext *s = avctx->priv_data;
 
+    /* Must be corruption since the packet isn't large enough to fill a header */
     if (size < DATA_UNIT_HEADER_SIZE)
         return AVERROR_INVALIDDATA;
 
+    /* Get the parse code identifier */
     parse_code = buf[4];
 
+    /* Skip the packet-like header and go directly to the data */
     init_get_bits(&s->gb, &buf[13], 8*(size - DATA_UNIT_HEADER_SIZE));
 
+    /* Sequence header - not actually always required, some encoders may put
+     * one sequence header every lots of frames */
     if (parse_code == DIRAC_PCODE_SEQ_HEADER) {
         if (s->seen_sequence_header)
             return 0;
@@ -633,14 +685,17 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
 
         ret = ff_set_dimensions(avctx, dsh->width, dsh->height);
 
+        /* In case of interlacing halve the internal height */
         if (dsh->field_coding)
             dsh->height >>= 1;
 
+        /* Error during decoding the sequence header */
         if (ret < 0) {
             av_freep(&dsh);
             return ret;
         }
 
+        /* Error on on change in pixel formats in the second field */
         if (s->cur_field && dsh->pix_fmt != s->prev_field_fmt) {
             av_log(avctx, AV_LOG_ERROR, "Second field has different pixel format!\n");
             av_freep(&dsh);
@@ -686,13 +741,14 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
     } else if (parse_code == DIRAC_PCODE_END_SEQ) { /* [DIRAC_STD] End of Sequence */
         s->seen_sequence_header = 0;
     } else if (parse_code == DIRAC_PCODE_AUX) {
-        ;
+        ; /* Usually contains encoder information */
     } else if (parse_code & 0x8) {  /* picture data unit */
         if (!s->seen_sequence_header) {
             av_log(avctx, AV_LOG_DEBUG, "Dropping frame without sequence header\n");
             return AVERROR_INVALIDDATA;
         }
 
+        /* Check that the picture parse code is supported */
         if (!((parse_code & 0xF8) == 0xE8)) {
             av_log(avctx, AV_LOG_ERROR, "Only the VC2 HQ profile is supported!\n");
             return AVERROR_INVALIDDATA;
@@ -716,6 +772,7 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
             s->plane[2].stride = pic->linesize[2];
             s->cur_field = 0;
         } else {
+            /* Picks the field number based on the parity of the picture number */
             s->cur_field = pict_num & 1;
 
             if (!s->cur_field) {
@@ -729,6 +786,7 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
             } else {
                 if (!s->current_picture || !s->prev_field)
                     return AVERROR_INVALIDDATA;
+                /* Check and reject second field having different dimensions */
                 if ((avctx->width  != s->current_picture->width ) ||
                     (avctx->height != s->current_picture->height)) {
                     av_log(avctx, AV_LOG_ERROR, "Second field has different width/height!\n");
@@ -747,6 +805,8 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
         if ((ret = dirac_decode_picture_header(s)))
             return ret;
 
+        /* Will warn if the encoder's not fast enough or the decoder's not fast
+         * enough or if a frame wasn't able to be decoded and was dropped */
         if (s->current_picture->display_picture_number &&
             s->current_picture->display_picture_number != s->prev_pict_number + 1)
             av_log(s->avctx, AV_LOG_WARNING,
@@ -774,9 +834,15 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     *got_frame = 0;
 
+    /* The parser screwed up - this can happen */
     if (buf_size == 13)
         return 0;
 
+    /* Loop around the buffer until it finds a parse code since the standard
+     * structure of a Sequence header, then an Aux header (encoder info), then
+     * the actual frame/field and finally the End of sequence header is not
+     * required and can be out of order with some parts even missing (seq header)!
+     * Though we reject if the sequence header is after the picture header */
     for (;;) {
         /*[DIRAC_STD] Here starts the code from parse_info() defined in 9.6
           [DIRAC_STD] PARSE_INFO_PREFIX = "BBCD" as defined in ISO/IEC 646
@@ -809,6 +875,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         buf_idx += data_unit_size;
     }
 
+    /* ref the top field's frame during field coded interlacing */
     if (s->field_coding) {
         if (!s->current_picture)
             return AVERROR_INVALIDDATA;
@@ -816,12 +883,14 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             return ret;
     }
 
+    /* Return a frame only if there was a valid picture in the packet */
     *got_frame = picture_element_present;
 
     /* No output for the top field, wait for the second */
     if (s->field_coding && !s->cur_field)
         *got_frame = 0;
 
+    /* Total bytes read */
     return buf_idx;
 }
 

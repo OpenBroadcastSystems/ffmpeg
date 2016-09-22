@@ -185,6 +185,7 @@ typedef struct VC2EncContext {
     enum DiracParseCodes last_parse_code;
 } VC2EncContext;
 
+/* Puts an unsigned golomb code to the bitstream */
 static av_always_inline void put_vc2_ue_uint(PutBitContext *pb, uint32_t val)
 {
     int i;
@@ -213,6 +214,7 @@ static av_always_inline void put_vc2_ue_uint(PutBitContext *pb, uint32_t val)
     put_bits(pb, bits*2 + 1, (pbits << 1) | 1);
 }
 
+/* Returns the number of bits needed to encode a value */
 static av_always_inline int count_vc2_ue_uint(uint32_t val)
 {
     int topbit = 1, maxval = 1;
@@ -229,6 +231,7 @@ static av_always_inline int count_vc2_ue_uint(uint32_t val)
     return ff_log2(topbit)*2 + 1;
 }
 
+/* Returns the encoded value and the number of bits needed to encode it */
 static av_always_inline void get_vc2_ue_uint(int val, uint8_t *nbits,
                                              uint32_t *eval)
 {
@@ -260,7 +263,9 @@ static av_always_inline void get_vc2_ue_uint(int val, uint8_t *nbits,
     *eval = (pbits << 1) | 1;
 }
 
-/* VC-2 10.4 - parse_info() */
+/* VC-2 10.4 - parse_info() - keeps track of how many bytes it's been since the
+ * last header the specs mention that you can just put 0 as the distance but the
+ * libavcodec parser still needs them because the format sucks */
 static void encode_parse_info(VC2EncContext *s, enum DiracParseCodes pcode)
 {
     uint32_t cur_pos, dist;
@@ -460,13 +465,14 @@ static void encode_slice_params(VC2EncContext *s)
 
 /* 1st idx = LL, second - vertical, third - horizontal, fourth - total */
 const uint8_t vc2_qm_col_tab[][4] = {
-    {20,  9, 15,  4},
-    { 0,  6,  6,  4},
-    { 0,  3,  3,  5},
-    { 0,  3,  5,  1},
-    { 0, 11, 10, 11}
+    {20,  9, 15,  4}, /* Level 1 - roughest details */
+    { 0,  6,  6,  4}, /* Level 2 */
+    { 0,  3,  3,  5}, /* Level 3 */
+    { 0,  3,  5,  1}, /* Level 4 */
+    { 0, 11, 10, 11}  /* Level 5 - finest details */
 };
 
+/* Flat qm table, optimized for PSNR */
 const uint8_t vc2_qm_flat_tab[][4] = {
     { 0,  0,  0,  0},
     { 0,  0,  0,  0},
@@ -490,11 +496,14 @@ static void init_quant_matrix(VC2EncContext *s)
         return;
     }
 
+    /* Levels over 3 are required to have a custom quantization matrix */
     s->custom_quant_matrix = 1;
 
     if (s->quant_matrix == VC2_QM_DEF) {
         for (level = 0; level < s->wavelet_depth; level++) {
             for (orientation = 0; orientation < 4; orientation++) {
+                /* The default quantization matrix doesn't have values for
+                 * levels over 3 so use the values from the Color QM tab we have */
                 if (level <= 3)
                     s->quant[level][orientation] = ff_dirac_default_qmat[s->wavelet_idx][level][orientation];
                 else
@@ -557,6 +566,8 @@ static void encode_picture_start(VC2EncContext *s)
     encode_wavelet_transform(s);
 }
 
+/* Quantize a single unsigned coefficient - left shift on signed is undefined,
+ * can use a multiply but it's easier to handle the sign separately */
 #define QUANT(c, qf) (((c) << 2)/(qf))
 
 /* VC-2 13.5.5.2 - slice_band() */
@@ -581,6 +592,7 @@ static void encode_subband(VC2EncContext *s, PutBitContext *pb, int sx, int sy,
             const int neg = coeff[x] < 0;
             uint32_t c_abs = FFABS(coeff[x]);
             if (c_abs < COEF_LUT_TAB) {
+                /* Append the sign to the end of the LUT value */
                 put_bits(pb, len_lut[c_abs], val_lut[c_abs] | neg);
             } else {
                 c_abs = QUANT(c_abs, qfactor);
@@ -600,6 +612,7 @@ static int count_hq_slice(SliceArgs *slice, int quant_idx)
     int bits = 0, p, level, orientation;
     VC2EncContext *s = slice->ctx;
 
+    /* Check the cache */
     if (slice->cache[quant_idx])
         return slice->cache[quant_idx];
 
@@ -663,11 +676,27 @@ static int rate_control(AVCodecContext *avctx, void *arg)
 {
     SliceArgs *slice_dat = arg;
     VC2EncContext *s = slice_dat->ctx;
+
+    /* Sets a top target which is the maximum slice size */
     const int top = slice_dat->bits_ceil;
+
+    /* Sets a bottom target which is the maximum slice size/tolerance value */
     const int bottom = slice_dat->bits_floor;
+
+    /* Keeps the previous 2 quantization index values if the second last is
+     * identical to the current it means it's entered an infinite loop -
+     * E.g. 12, 13, 12, 13, 12 - neither satisfy the target range, so break out
+     * and pick the lowest value - waste goes to the second pass */
     int quant_buf[2] = {-1, -1};
-    int quant = slice_dat->quant_idx, step = 1;
+
+    /* Starts from the previous quantization index (if it exists) */
+    int quant = slice_dat->quant_idx;
+
+    /* Step size depending on how far away it is from satisfying the range */
+    int step = 1;
+
     int bits_last, bits = count_hq_slice(slice_dat, quant);
+
     while ((bits > top) || (bits < bottom)) {
         const int signed_step = bits > top ? +step : -step;
         quant  = av_clip(quant + signed_step, 0, s->q_ceil-1);
@@ -677,7 +706,7 @@ static int rate_control(AVCodecContext *avctx, void *arg)
             bits  = quant == quant_buf[0] ? bits_last : bits;
             break;
         }
-        step         = av_clip(step/2, 1, (s->q_ceil-1)/2);
+        step         = av_clip(step/2, 1, (s->q_ceil - 1)/2);
         quant_buf[1] = quant_buf[0];
         quant_buf[0] = quant;
         bits_last    = bits;
@@ -696,8 +725,10 @@ static int calc_slice_sizes(VC2EncContext *s)
     SliceArgs *enc_args = s->slice_args;
     SliceArgs *top_loc[SLICE_REDIST_TOTAL] = {NULL};
 
+    /* Set up the quantization matrices for each level & orientation */
     init_quant_matrix(s);
 
+    /* Initialize the slice contexts - doesn't reset the quantization index */
     for (slice_y = 0; slice_y < s->num_y; slice_y++) {
         for (slice_x = 0; slice_x < s->num_x; slice_x++) {
             SliceArgs *args = &enc_args[s->num_x*slice_y + slice_x];
@@ -710,10 +741,13 @@ static int calc_slice_sizes(VC2EncContext *s)
         }
     }
 
-    /* First pass - determine baseline slice sizes w.r.t. max_slice_size */
+    /* 1st pass - strictly fits the slices under the maximum slice size,
+     * aligning the slice size to below the maximum slice size wastes bits
+     * which get used by the second pass */
     s->avctx->execute(s->avctx, rate_control, enc_args, NULL, s->num_x*s->num_y,
                       sizeof(SliceArgs));
 
+    /* Fill up the pointers to the most costly slice_redist_range number of slices */
     for (i = 0; i < s->num_x*s->num_y; i++) {
         SliceArgs *args = &enc_args[i];
         bytes_left += args->bytes;
@@ -728,7 +762,9 @@ static int calc_slice_sizes(VC2EncContext *s)
 
     bytes_left = s->frame_max_bytes - bytes_left;
 
-    /* Second pass - distribute leftover bytes */
+    /* 2nd pass - uses the leftover bits and distributes them to the highest
+     * costing slices to boost the quality. Not required, you can comment it
+     * out to gain a little more speed, but impact is very minimal */
     while (bytes_left > 0) {
         int distributed = 0;
         for (i = 0; i < slice_redist_range; i++) {
@@ -755,6 +791,9 @@ static int calc_slice_sizes(VC2EncContext *s)
             break;
     }
 
+    /* Counts total bytes for each slices to know how big of a packet to allocate,
+     * keeps track of the average quantizer used, generally anything above 50
+     * will give a gray frame */
     for (i = 0; i < s->num_x*s->num_y; i++) {
         SliceArgs *args = &enc_args[i];
         total_bytes_needed += args->bytes;
@@ -812,7 +851,9 @@ static int encode_hq_slice(AVCodecContext *avctx, void *arg)
         }
         pb->buf[bytes_start] = pad_s;
         flush_put_bits(pb);
-        /* vc2-reference uses that padding that decodes to '0' coeffs */
+        /* vc2-reference uses that padding that decodes to '0' coeffs -
+         * that way if there's corruption and the decoder overreads it'll
+         * decode the coefficients to 0 and end quickly */
         memset(put_bits_ptr(pb), 0xFF, pad_c);
         skip_put_bytes(pb, pad_c);
     }
@@ -834,6 +875,7 @@ static int encode_slices(VC2EncContext *s)
     for (slice_y = 0; slice_y < s->num_y; slice_y++) {
         for (slice_x = 0; slice_x < s->num_x; slice_x++) {
             SliceArgs *args = &enc_args[s->num_x*slice_y + slice_x];
+            /* Inits a separate put_bits context for each slice at a given position */
             init_put_bits(&args->pb, buf + skip, args->bytes+s->prefix_bytes);
             skip += args->bytes;
         }
@@ -841,7 +883,7 @@ static int encode_slices(VC2EncContext *s)
 
     s->avctx->execute(s->avctx, encode_hq_slice, enc_args, NULL, s->num_x*s->num_y,
                       sizeof(SliceArgs));
-
+    /* Skips the main put_bits's position by the total slice bytes */
     skip_put_bytes(&s->pb, skip);
 
     return 0;
@@ -898,6 +940,7 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
     int x, y, level, offset;
     ptrdiff_t pix_stride = linesize >> (s->bpp - 1);
 
+    /* Will skip 2*stride and offset it in interlaced mode */
     if (field == 1) {
         offset = 0;
         pix_stride <<= 1;
@@ -908,6 +951,7 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
         offset = 0;
     }
 
+    /* Copy and convert unsigned to signed using s->diff_offset */
     if (s->bpp == 1) {
         const uint8_t *pix = (const uint8_t *)frame_data + offset;
         for (y = 0; y < p->height*skip; y+=skip) {
@@ -928,8 +972,10 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
         }
     }
 
+    /* Zero the padding out */
     memset(buf, 0, p->coef_stride * (p->dwt_height - p->height) * sizeof(dwtcoef));
 
+    /* Do the actual dwt */
     for (level = s->wavelet_depth-1; level >= 0; level--) {
         const SubBand *b = &p->band[level][0];
         t->vc2_subband_dwt[idx](t, p->coef_buf, p->coef_stride,
@@ -939,6 +985,7 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
     return 0;
 }
 
+/* Field - 0 progressive, 1 - top field, 2 - bottom field */
 static int encode_frame(VC2EncContext *s, AVPacket *avpkt, const AVFrame *frame,
                         const char *aux_data, const int header_size, int field)
 {
@@ -960,6 +1007,7 @@ static int encode_frame(VC2EncContext *s, AVPacket *avpkt, const AVFrame *frame,
     /* Calculate per-slice quantizers and sizes */
     max_frame_bytes = header_size + calc_slice_sizes(s);
 
+    /* Allocates the packet on the first field */
     if (field < 2) {
         int64_t packet_size = max_frame_bytes;
         if (field > 0) {
@@ -1037,11 +1085,14 @@ static av_cold int vc2_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     s->next_parse_offset = 0;
 
     /* Rate control */
+    /* bitrate(per second)/framerate */
     s->frame_max_bytes = (av_rescale(r_bitrate, s->avctx->time_base.num,
                                      s->avctx->time_base.den) >> 3) - header_size;
+    /* preliminary max slice size (max_frame_bytes/number_of_slices) */
     s->slice_max_bytes = slice_ceil = av_rescale(s->frame_max_bytes, 1, s->num_x*s->num_y);
 
-    /* Find an appropriate size scaler */
+    /* Find an appropriate size scaler, tricky, increasing s->size_scaler makes
+     * it safer but increases the padding */
     while (sig_size > 255) {
         int r_size = SSIZE_ROUND(s->slice_max_bytes);
         if (r_size > slice_ceil) {
@@ -1053,6 +1104,8 @@ static av_cold int vc2_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     }
 
     s->slice_min_bytes = s->slice_max_bytes - s->slice_max_bytes*(s->tolerance/100.0f);
+
+    /* Calls encode_frame() once for each field (or once for progressive) */
 
     ret = encode_frame(s, avpkt, frame, aux_data, header_size, s->interlaced);
     if (ret)
@@ -1101,7 +1154,8 @@ static av_cold int vc2_encode_init(AVCodecContext *avctx)
 
     s->picture_number = 0;
 
-    /* Total allowed quantization range */
+    /* Total allowed quantization range, minimum quality, reduce DIRAC_MAX_QUANT_INDEX
+     * to boost minimal quality the rate control system will set (clips the maximum quantizer) */
     s->q_ceil    = DIRAC_MAX_QUANT_INDEX;
 
     s->ver.major = 2;
@@ -1243,7 +1297,9 @@ static av_cold int vc2_encode_init(AVCodecContext *avctx)
         goto alloc_fail;
 
     for (i = 0; i < s->q_ceil; i++) {
+        /* Value (what to put in) - without the sign bit (gets OR'd during encoding) */
         uint8_t  *len_lut = &s->coef_lut_len[i*COEF_LUT_TAB];
+        /* Length (how long it is) - counts the sign bit in! */
         uint32_t *val_lut = &s->coef_lut_val[i*COEF_LUT_TAB];
         for (j = 0; j < COEF_LUT_TAB; j++) {
             get_vc2_ue_uint(QUANT(j, ff_dirac_qscale_tab[i]),
@@ -1256,6 +1312,11 @@ static av_cold int vc2_encode_init(AVCodecContext *avctx)
             }
         }
     }
+
+    /* Quantization LUT layout: {
+     *     [Coeff 0 for Quant 1, Coeff 1 for Quant 1 ...],
+     *     [Coeff 0 for Quant 2, Coeff 1 for Quant 2 ...], }
+     */
 
     return 0;
 
