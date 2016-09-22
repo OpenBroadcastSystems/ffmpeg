@@ -128,6 +128,10 @@ typedef struct DiracContext {
     unsigned prefix_bytes;
     uint64_t size_scaler;
 
+    int seq_buf_allocated_width;
+    int seq_buf_allocated_height;
+    enum AVPixelFormat seq_buf_allocated_fmt;
+
     AVFrame *dummy_frame, *prev_field, *current_picture;
 } DiracContext;
 
@@ -169,6 +173,9 @@ static void free_sequence_buffers(DiracContext *s)
         av_freep(&s->plane[i].idwt.buf_base);
         av_freep(&s->plane[i].idwt.tmp);
     }
+    s->seq_buf_allocated_width  = 0;
+    s->seq_buf_allocated_height = 0;
+    s->seq_buf_allocated_fmt    = 0;
 }
 
 static av_cold int dirac_decode_init(AVCodecContext *avctx)
@@ -663,13 +670,20 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
 
         avcodec_get_chroma_sub_sample(avctx->pix_fmt, &s->chroma_x_shift, &s->chroma_y_shift);
 
-        ret = alloc_sequence_buffers(s);
-        if (ret < 0)
-            return ret;
+        if (avctx->width   != s->seq_buf_allocated_width ||
+            avctx->width   != s->seq_buf_allocated_width ||
+            avctx->pix_fmt != s->seq_buf_allocated_fmt) {
+            free_sequence_buffers(s);
+            s->seq_buf_allocated_width  = avctx->width;
+            s->seq_buf_allocated_height = avctx->height;
+            s->seq_buf_allocated_fmt    = avctx->pix_fmt;
+            ret = alloc_sequence_buffers(s);
+            if (ret < 0)
+                return ret;
+        }
 
         s->seen_sequence_header = 1;
     } else if (parse_code == DIRAC_PCODE_END_SEQ) { /* [DIRAC_STD] End of Sequence */
-        free_sequence_buffers(s);
         s->seen_sequence_header = 0;
     } else if (parse_code == DIRAC_PCODE_AUX) {
         ;
