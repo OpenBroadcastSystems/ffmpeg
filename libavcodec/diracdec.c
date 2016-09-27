@@ -130,6 +130,7 @@ typedef struct DiracContext {
 
     int seq_buf_allocated_width;
     int seq_buf_allocated_height;
+    int seq_buf_allocated_coding;
     enum AVPixelFormat seq_buf_allocated_fmt;
 
     AVFrame *dummy_frame, *prev_field, *current_picture;
@@ -727,11 +728,13 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *frame,
 
         if (avctx->width   != s->seq_buf_allocated_width ||
             avctx->width   != s->seq_buf_allocated_width ||
-            avctx->pix_fmt != s->seq_buf_allocated_fmt) {
+            avctx->pix_fmt != s->seq_buf_allocated_fmt   ||
+            s->field_coding != s->seq_buf_allocated_coding) {
             free_sequence_buffers(s);
             s->seq_buf_allocated_width  = avctx->width;
             s->seq_buf_allocated_height = avctx->height;
             s->seq_buf_allocated_fmt    = avctx->pix_fmt;
+            s->seq_buf_allocated_coding = s->field_coding;
             ret = alloc_sequence_buffers(s);
             if (ret < 0)
                 return ret;
