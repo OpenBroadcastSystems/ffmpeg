@@ -730,7 +730,7 @@ static int dirac_decode_picture_header(DiracContext *s)
 static int dirac_decode_data_unit(AVCodecContext *avctx,
                                   const uint8_t *buf, int size)
 {
-    int ret;
+    int ret, get_bits_read = 0;
     AVFrame *pic;
     uint32_t pict_num;
     uint8_t parse_code;
@@ -760,6 +760,7 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
             av_log(avctx, AV_LOG_ERROR, "error parsing sequence header");
             return ret;
         }
+        get_bits_read = ret;
 
         ret = ff_set_dimensions(avctx, dsh->width, dsh->height);
 
@@ -824,6 +825,7 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
         s->seen_sequence_header = 1;
     } else if (parse_code == DIRAC_PCODE_END_SEQ) { /* [DIRAC_STD] End of Sequence */
         s->seen_sequence_header = 0;
+        get_bits_read = DATA_UNIT_HEADER_SIZE * 8;
     } else if (parse_code == DIRAC_PCODE_AUX) {
         ; /* Usually contains encoder information */
     } else if ((parse_code & 0x88) == 0x88) {  /* picture data unit */
@@ -930,17 +932,18 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
         }
 
         if (s->is_fragment && !num_slices)
-            return 0;
+            return get_bits_count(&s->gb);
 
         /* [DIRAC_STD] 13.0 Transform data syntax. transform_data() */
         ret = dirac_decode_frame_internal(s);
         if (ret < 0)
             return ret;
+        get_bits_read = get_bits_count(&s->gb);
     } else {
         av_log(s->avctx, AV_LOG_WARNING, "unknown Parse Code (0x%x), continuing\n", parse_code);
     }
 
-    return 0;
+    return get_bits_read;
 }
 
 static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPacket *pkt)
@@ -978,8 +981,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             break;
 
         data_unit_size = AV_RB32(buf+buf_idx+5);
-        if (data_unit_size > buf_size - buf_idx || !data_unit_size) {
-            if(data_unit_size > buf_size - buf_idx)
+        if (data_unit_size > buf_size - buf_idx) {
             av_log(s->avctx, AV_LOG_ERROR,
                    "Data unit with size %d is larger than input buffer, discarding\n",
                    data_unit_size);
@@ -987,11 +989,15 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             continue;
         }
         /* [DIRAC_STD] dirac_decode_data_unit makes reference to the while defined in 9.3 inside the function parse_sequence() */
-        ret = dirac_decode_data_unit(avctx, buf+buf_idx, data_unit_size);
+        if (data_unit_size)
+            ret = dirac_decode_data_unit(avctx, buf+buf_idx, data_unit_size);
+        else
+            ret = dirac_decode_data_unit(avctx, buf+buf_idx, buf_size - buf_idx);
         if (ret < 0) {
             av_log(s->avctx, AV_LOG_ERROR, "Error in dirac_decode_data_unit\n");
             return ret;
         }
+
         if (s->is_fragment) {
             picture_element_present = s->fragment_slices_received == (s->num_x * s->num_y);
         } else {
@@ -999,7 +1005,11 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
             picture_element_present |= parse_code == DIRAC_PCODE_PICTURE_HQ
                 || parse_code == DIRAC_PCODE_PICTURE_FRAGMENT_HIGH_QUALITY;
         }
-        buf_idx += data_unit_size;
+
+        if (data_unit_size)
+            buf_idx += data_unit_size;
+        else
+            buf_idx += ret + 7 >> 3;
     }
 
     /* ref the top field's frame during field coded interlacing */
