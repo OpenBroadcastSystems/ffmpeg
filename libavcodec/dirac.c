@@ -388,7 +388,7 @@ int av_dirac_parse_sequence_header(AVDiracSeqHeader **pdsh,
     }
 
     *pdsh = dsh;
-    return 0;
+    return get_bits_count(&gb);
 fail:
     av_freep(&dsh);
     *pdsh = NULL;
