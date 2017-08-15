@@ -346,7 +346,7 @@ int av_dirac_parse_sequence_header(AVDiracSeqHeader **pdsh,
 
     if (dsh->version.major < 2 && log_ctx)
         av_log(log_ctx, AV_LOG_WARNING, "Stream is old and may not work\n");
-    else if (dsh->version.major > 2 && log_ctx)
+    else if (dsh->version.major > 3 && log_ctx)
         av_log(log_ctx, AV_LOG_WARNING, "Stream may have unhandled features\n");
 
     if (video_format > 20U) {
