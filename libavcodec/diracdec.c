@@ -365,7 +365,7 @@ static int decode_hq_slice_row(AVCodecContext *avctx, void *arg, int jobnr, int 
     uint8_t *thread_buf = &s->thread_buf[s->thread_buf_size*threadnr];
     /* Loop over all horizontal slices in the row */
     for (i = 0; i < s->num_x; i++)
-        decode_hq_slice(s, &slices[i], thread_buf);
+        decode_hq_slice(s, &slices[i], thread_buf); //TODO: use returned error code
     return 0;
 }
 
@@ -435,6 +435,12 @@ static int decode_lowdelay(DiracContext *s)
         x_offset = get_bits_long(&s->gb, 16);
         y_offset = get_bits_long(&s->gb, 16);
 
+        if (x_offset >= s->num_x || y_offset >= s->num_y) {
+            av_log(s->avctx, AV_LOG_ERROR, "fragment slice offset (%d,%d) is invalid for slice dimensions (%dx%d)\n",
+                    x_offset, y_offset, s->num_x, s->num_y);
+            return AVERROR_INVALIDDATA;
+        }
+
         /* byte_align and update buffer position before fragment_data */
         align_get_bits(&s->gb);
         buf = s->gb.buffer + get_bits_count(&s->gb)/8;
@@ -464,7 +470,7 @@ static int decode_lowdelay(DiracContext *s)
             else
                 bufsize = 0;
 
-            decode_hq_slice(s, &slices[slice], s->thread_buf);
+            decode_hq_slice(s, &slices[slice], s->thread_buf); //TODO: use returned error code
         }
         s->fragment_slices_received += slice_num;
     } else {
