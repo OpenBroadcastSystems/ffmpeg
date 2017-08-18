@@ -900,7 +900,8 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
         if (!s->is_fragment || (s->is_fragment && s->fragment_slice_count == 0)) {
             /* because we didn't _read_ the fragment_data_length and
              * fragment_slice_count above we need to skip those 32-bits here. */
-            skip_bits(&s->gb, 32);
+            if (s->is_fragment)
+                skip_bits(&s->gb, 32);
 
             /* [DIRAC_STD] 11.1 Picture parse. picture_parse() */
             if ((ret = dirac_decode_picture_header(s))) {
