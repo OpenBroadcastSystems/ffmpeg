@@ -936,7 +936,10 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
         ret = dirac_decode_frame_internal(s);
         if (ret < 0)
             return ret;
+    } else {
+        av_log(s->avctx, AV_LOG_WARNING, "unknown Parse Code (0x%x), continuing\n", parse_code);
     }
+
     return 0;
 }
 
@@ -992,7 +995,9 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         if (s->is_fragment) {
             picture_element_present = s->fragment_slices_received == (s->num_x * s->num_y);
         } else {
-            picture_element_present |= *(buf + buf_idx + 4) & 0x8;
+            uint8_t parse_code = *(buf + buf_idx + 4);
+            picture_element_present |= parse_code == DIRAC_PCODE_PICTURE_HQ
+                || parse_code == DIRAC_PCODE_PICTURE_FRAGMENT_HIGH_QUALITY;
         }
         buf_idx += data_unit_size;
     }
