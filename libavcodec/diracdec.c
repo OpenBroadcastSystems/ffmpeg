@@ -453,8 +453,7 @@ static int decode_lowdelay(DiracContext *s)
                     bytes += buf[bytes] * s->size_scaler + 1;
             }
             if (bytes >= INT_MAX || bytes*8 > bufsize) {
-                av_log(s->avctx, AV_LOG_ERROR, "too many bytes\n");
-                abort();
+                av_log(s->avctx, AV_LOG_ERROR, "too many bytes\n"); //TODO: improve message
                 return AVERROR_INVALIDDATA;
             }
 
