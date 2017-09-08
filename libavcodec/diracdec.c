@@ -427,7 +427,7 @@ static int decode_lowdelay(DiracContext *s)
 
         slice_num = get_bits_long(&s->gb, 16);
         if (!slice_num || s->fragment_slices_received + slice_num > s->num_x*s->num_y) {
-            av_log(s->avctx, AV_LOG_ERROR, "invalid number of slices\n");
+            av_log(s->avctx, AV_LOG_ERROR, "invalid number of slices (%d)\n", slice_num);
             return AVERROR_INVALIDDATA;
         }
 
@@ -561,10 +561,10 @@ static int dirac_unpack_idwt_params(DiracContext *s)
     int i, level;
     int tmp, asym_transform_index_flag, asym_transform_flag;
 
-#define CHECKEDREAD(dst, cond, errmsg) \
+#define CHECKEDREAD(dst, cond, ...) \
     tmp = get_interleaved_ue_golomb(gb); \
     if (cond) { \
-        av_log(s->avctx, AV_LOG_ERROR, errmsg); \
+        av_log(s->avctx, AV_LOG_ERROR, __VA_ARGS__); \
         return AVERROR_INVALIDDATA; \
     }\
     dst = tmp;
@@ -572,7 +572,7 @@ static int dirac_unpack_idwt_params(DiracContext *s)
     align_get_bits(gb);
 
     /*[DIRAC_STD] 11.3.1 Transform parameters. transform_parameters() */
-    CHECKEDREAD(s->wavelet_idx, tmp > 6, "wavelet_idx is too big\n")
+    CHECKEDREAD(s->wavelet_idx, tmp > 6, "wavelet_idx is too big (%d > 6)\n", tmp)
 
     CHECKEDREAD(s->wavelet_depth, tmp > MAX_DWT_LEVELS || tmp < 1, "invalid number of DWT decompositions\n")
 
