@@ -581,11 +581,11 @@ static int dirac_unpack_idwt_params(DiracContext *s)
         asym_transform_index_flag = get_bits1(gb);
         if (asym_transform_index_flag)
             get_interleaved_ue_golomb(gb);
-        
+
         asym_transform_flag = get_bits1(gb);
         if (asym_transform_flag)
             get_interleaved_ue_golomb(gb);
-        
+
         if (asym_transform_index_flag || asym_transform_flag)
             avpriv_request_sample(s->avctx, "Asymmetric transform");
     }
@@ -850,7 +850,6 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
 
         /* [DIRAC_STD] 11.1.1 Picture Header. picture_header(), also 14.2 for fragment */
         pict_num = get_bits_long(&s->gb, 32);
-        av_log(s->avctx, AV_LOG_DEBUG, "Picture number: %d\n", pict_num);
 
         /* Read the fragment header of the first fragment */
         if (s->is_fragment) {
@@ -982,7 +981,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
         data_unit_size = AV_RB32(buf+buf_idx+5);
         if (data_unit_size > buf_size - buf_idx) {
-            av_log(s->avctx, AV_LOG_ERROR,
+            av_log(avctx, AV_LOG_ERROR,
                    "Data unit with size %d is larger than input buffer, discarding\n",
                    data_unit_size);
             buf_idx += 4;
@@ -994,7 +993,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         else
             ret = dirac_decode_data_unit(avctx, buf+buf_idx, buf_size - buf_idx);
         if (ret < 0) {
-            av_log(s->avctx, AV_LOG_ERROR, "Error in dirac_decode_data_unit\n");
+            av_log(avctx, AV_LOG_ERROR, "Error in dirac_decode_data_unit\n");
             return ret;
         }
 
@@ -1027,7 +1026,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     /* Return a frame only if there was a valid picture in the packet */
     if (picture_element_present) {
         if (s->is_fragment)
-            s->avctx->execute2(s->avctx, idwt_plane, NULL, NULL, 3);
+            avctx->execute2(avctx, idwt_plane, NULL, NULL, 3);
 
         *got_frame = 1;
         // TODO: do something with frame
