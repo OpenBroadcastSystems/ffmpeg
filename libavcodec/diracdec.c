@@ -139,8 +139,7 @@ typedef struct DiracContext {
     int seq_buf_allocated_coding;
     enum AVPixelFormat seq_buf_allocated_fmt;
 
-    AVFrame *dummy_frame, *prev_field, *current_picture;
-    AVFrame fragment_picture;
+    AVFrame *cached_picture, *prev_field, *current_picture;
 } DiracContext;
 
 static int alloc_sequence_buffers(DiracContext *s)
@@ -205,7 +204,7 @@ static av_cold int dirac_decode_init(AVCodecContext *avctx)
     s->slice_params_buf = NULL;
     s->slice_params_num_buf = -1;
 
-    s->dummy_frame = av_frame_alloc();
+    s->cached_picture = av_frame_alloc();
 
     return 0;
 }
@@ -228,7 +227,7 @@ static av_cold int dirac_decode_end(AVCodecContext *avctx)
     av_freep(&s->thread_buf);
     av_freep(&s->slice_params_buf);
 
-    av_frame_free(&s->dummy_frame);
+    av_frame_free(&s->cached_picture);
 
     return 0;
 }
@@ -842,7 +841,7 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
 
         s->is_fragment = (parse_code & 0x0C) == 0x0C;
 
-        pic = s->dummy_frame; // TODO: use something else when doing interlaced.
+        pic = s->cached_picture; // TODO: use something else when doing interlaced.
         pic->key_frame = 1;
         pic->pict_type = AV_PICTURE_TYPE_I;
 
