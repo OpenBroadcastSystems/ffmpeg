@@ -726,7 +726,7 @@ static int dirac_decode_picture_header(DiracContext *s)
 
 /* [DIRAC_STD] dirac_decode_data_unit makes reference to the while defined in 9.3
    inside the function parse_sequence() */
-static int dirac_decode_data_unit(AVCodecContext *avctx,
+static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *output_frame,
                                   const uint8_t *buf, int size)
 {
     int ret, get_bits_read = 0;
@@ -841,7 +841,11 @@ static int dirac_decode_data_unit(AVCodecContext *avctx,
 
         s->is_fragment = (parse_code & 0x0C) == 0x0C;
 
-        pic = s->cached_picture; // TODO: use something else when doing interlaced.
+        if (s->is_fragment || s->field_coding)
+            pic = s->cached_picture;
+        else
+            pic = output_frame;
+
         pic->key_frame = 1;
         pic->pict_type = AV_PICTURE_TYPE_I;
 
@@ -988,9 +992,9 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         }
         /* [DIRAC_STD] dirac_decode_data_unit makes reference to the while defined in 9.3 inside the function parse_sequence() */
         if (data_unit_size)
-            ret = dirac_decode_data_unit(avctx, buf+buf_idx, data_unit_size);
+            ret = dirac_decode_data_unit(avctx, f, buf+buf_idx, data_unit_size);
         else
-            ret = dirac_decode_data_unit(avctx, buf+buf_idx, buf_size - buf_idx);
+            ret = dirac_decode_data_unit(avctx, f, buf+buf_idx, buf_size - buf_idx);
         if (ret < 0) {
             av_log(avctx, AV_LOG_ERROR, "Error in dirac_decode_data_unit\n");
             return ret;
@@ -1024,13 +1028,12 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     /* Return a frame only if there was a valid picture in the packet */
     if (picture_element_present) {
-        if (s->is_fragment)
+        if (s->is_fragment) {
             avctx->execute2(avctx, idwt_plane, NULL, NULL, 3);
+            av_frame_move_ref(data, s->cached_picture);
+        }
 
         *got_frame = 1;
-        // TODO: do something with frame
-        //ret = av_frame_ref(data, s->current_picture);
-        av_frame_move_ref(data, s->current_picture);
     } else {
         *got_frame = 0;
     }
