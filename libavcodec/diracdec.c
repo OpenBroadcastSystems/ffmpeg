@@ -923,13 +923,13 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *output_frame,
         if (!s->is_fragment || (s->is_fragment && s->fragment_slice_count == 0)) {
             /* Will warn if the encoder's not fast enough or the decoder's not fast
             * enough or if a frame wasn't able to be decoded and was dropped */
-            if (pic->display_picture_number &&
-                pic->display_picture_number != s->prev_pict_number + 1)
+            if (s->current_picture->display_picture_number &&
+                s->current_picture->display_picture_number != s->prev_pict_number + 1)
                 av_log(s->avctx, AV_LOG_WARNING,
                     "Picture number is not linearly incrementing, %i -> %i\n",
-                    s->prev_pict_number, pic->display_picture_number);
+                    s->prev_pict_number, s->current_picture->display_picture_number);
 
-            s->prev_pict_number = pic->display_picture_number;
+            s->prev_pict_number = s->current_picture->display_picture_number;
         }
 
         if (s->is_fragment && !num_slices)
