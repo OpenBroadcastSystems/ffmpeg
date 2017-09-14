@@ -865,28 +865,29 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *output_frame,
             /* TODO: maybe read x and y offset here */
         }
 
-        /* For not fragmented pictures or on the first fragment a new picture
-         * needs to be allocated. */
         if (!s->is_fragment || (s->is_fragment && s->fragment_slice_count == 0)) {
-            /* For frame coded pictures simply allocate a new picture. */
             if (!s->field_coding) {
                 if ((ret = get_buffer_with_edge(avctx, pic, 0)) < 0)
                     return ret;
+                pic->display_picture_number = pict_num;
+                s->current_picture = pic;
+                s->plane[0].stride = pic->linesize[0];
+                s->plane[1].stride = pic->linesize[1];
+                s->plane[2].stride = pic->linesize[2];
                 s->cur_field = 0;
             } else {
                 /* Picks the field number based on the parity of the picture number */
                 s->cur_field = pict_num & 1;
 
-                /* For field coded pictures only allocate a new picture on the
-                 * first field */
                 if (!s->cur_field) {
                     av_frame_unref(s->prev_field);
                     if ((ret = get_buffer_with_edge(avctx, pic, AV_GET_BUFFER_FLAG_REF)) < 0)
                         return ret;
                     s->prev_field = pic;
+                    s->plane[0].stride = pic->linesize[0];
+                    s->plane[1].stride = pic->linesize[1];
+                    s->plane[2].stride = pic->linesize[2];
                 } else {
-                    /* Perform a couple of sanity checks on the second field.
-                     * The first one may have been lost. */
                     if (!s->current_picture || !s->prev_field)
                         return AVERROR_INVALIDDATA;
                     /* Check and reject second field having different dimensions */
@@ -895,14 +896,14 @@ static int dirac_decode_data_unit(AVCodecContext *avctx, AVFrame *output_frame,
                         av_log(avctx, AV_LOG_ERROR, "Second field has different width/height!\n");
                         return AVERROR_INVALIDDATA;
                     }
+                    s->plane[0].stride = s->current_picture->linesize[0];
+                    s->plane[1].stride = s->current_picture->linesize[1];
+                    s->plane[2].stride = s->current_picture->linesize[2];
                 }
-            }
 
-            s->plane[0].stride = pic->linesize[0];
-            s->plane[1].stride = pic->linesize[1];
-            s->plane[2].stride = pic->linesize[2];
-            pic->display_picture_number = pict_num;
-            s->current_picture = pic;
+                s->prev_field->display_picture_number = pict_num;
+                s->current_picture = s->prev_field;
+            }
         }
 
         if (!s->is_fragment || (s->is_fragment && s->fragment_slice_count == 0)) {
