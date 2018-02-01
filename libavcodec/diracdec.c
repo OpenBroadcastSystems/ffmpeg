@@ -1003,7 +1003,7 @@ static int dirac_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         } else {
             uint8_t parse_code = *(buf + buf_idx + 4);
             picture_element_present |= parse_code == DIRAC_PCODE_PICTURE_HQ
-                || parse_code == DIRAC_PCODE_PICTURE_FRAGMENT_HIGH_QUALITY;
+                || parse_code == DIRAC_PCODE_PICTURE_FRAGMENT_HQ;
         }
 
         if (data_unit_size)
